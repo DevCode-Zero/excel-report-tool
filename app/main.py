@@ -1,23 +1,25 @@
-from fastapi import FastAPI, UploadFile, File, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, UploadFile, File, Request, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
-import shutil
+import io
+import logging
 
 from app.aggregator import aggregate_files
 from app.report_generator import generate_report
 from fastapi.staticfiles import StaticFiles
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
-templates = Jinja2Templates(directory="templates")
+ROOT_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = ROOT_DIR / "static"
+TEMPLATES_DIR = ROOT_DIR / "templates"
 
-UPLOAD_DIR = Path("uploads")
-REPORT_DIR = Path("reports")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-UPLOAD_DIR.mkdir(exist_ok=True)
-REPORT_DIR.mkdir(exist_ok=True)
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -28,19 +30,31 @@ def home(request: Request):
 @app.post("/upload")
 async def upload(files: list[UploadFile] = File(...)):
 
-    saved_files = []
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
 
-    for file in files:
-        file_path = UPLOAD_DIR / file.filename
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+    excel_streams: list[io.BytesIO] = []
 
-        saved_files.append(file_path)
+    for upload in files:
+        try:
+            contents = await upload.read()
+        except Exception:
+            logger.exception("Failed reading upload: %s", getattr(upload, "filename", "<unknown>"))
+            raise HTTPException(status_code=400, detail=f"Failed reading file: {upload.filename}")
 
-    combined_df = aggregate_files(saved_files)
+        if not contents:
+            raise HTTPException(status_code=400, detail=f"Empty file: {upload.filename}")
 
-    report_path = REPORT_DIR / "Final_Report.xlsx"
+        excel_streams.append(io.BytesIO(contents))
 
-    generate_report(combined_df, report_path)
+    combined_df = aggregate_files(excel_streams)
 
-    return FileResponse(report_path, filename="Final_Report.xlsx")
+    report_io = io.BytesIO()
+    generate_report(combined_df, report_io)
+    report_io.seek(0)
+
+    return StreamingResponse(
+        report_io,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="Final_Report.xlsx"'},
+    )

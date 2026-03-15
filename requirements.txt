@@ -8,6 +8,4 @@ python-multipart
 
 # to run the application In local Machine,
 # use the following command:
-#python3 -m uvicorn app.main
-#to reload the server on code changes, use the following command:
-#python3 -m uvicorn app.main --reload
+# uvicorn app.main:app --reload
